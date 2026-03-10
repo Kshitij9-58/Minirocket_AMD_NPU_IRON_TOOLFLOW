@@ -179,7 +179,7 @@ def main():
     permutations = list(itertools.permutations(base_indices))
     
     best_acc = 0
-    best_perm = None
+   # best_perm = None
     
     print(f"{'MAPPING (NPU->True)':<25} | {'ACCURACY':<10}")
     print("-" * 40)
