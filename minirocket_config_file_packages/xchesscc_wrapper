@@ -1,0 +1,2 @@
+#!/bin/bash
+"/home/k002/.local/bin/xchesscc_wrapper" "$@" /home/k002/minirocket_npu/Minirocket_amd-npu_project/programming_examples/npu_project_final/ukernel.o
