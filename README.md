@@ -1,16 +1,8 @@
 MiniROCKET Implementation on AMD XDNA NPU (IRON Toolflow)
 
-This repository contains the bare metal implementation of the MiniROCKET time series classifier on an AMD Ryzen AI Neural Processing Unit (NPU).
+## This repository contains the bare metal implementation of the MiniROCKET time series classifier on an AMD Ryzen AI Neural Processing Unit (NPU). ROCKET is a time series classifier published in 2020 that achieves state-of-the-art accuracy with a fraction of the computational expense by transforming input time series using random convolutional kernels. MiniROCKET introduces engineering improvements that make the algorithm nearly deterministic and exceptionally fast, running ~75× faster on large datasets. The AMD NPU is a dedicated AI engine within AMD's Ryzen processors. It accelerates machine learning tasks, particularly inference, by offloading computationally intensive workloads from the CPU.
 
-ROCKET is a time series classifier published in 2020 that achieves state-of-the-art accuracy with a fraction of the computational expense by transforming input time series using random convolutional kernels.
-
-MiniROCKET introduces engineering improvements that make the algorithm nearly deterministic and exceptionally fast, running ~75× faster on large datasets.
-
-The AMD NPU is a dedicated AI engine within AMD's Ryzen processors. It accelerates machine learning tasks, particularly inference, by offloading computationally intensive workloads from the CPU.
-
-This project implements MiniROCKET training and inference on an AMD NPU using AMD's IRON API and toolchain.
-
-The NPU comprises a spatial array of tiles. By dynamically programming the Data Movement Accelerators (DMAs), the massive parallel convolutions are mapped to a 3-Tile spatial architecture on the AI Engine array, routing data between the tiles.
+## This project implements MiniROCKET training and inference natively on an AMD NPU using the AMD IRON API and MLIR-AIE toolchain. By mapping the convolutional transforms and linear inference directly onto the dedicated spatial architecture of the AIE Tile array, this work explores the practical limits of bare-metal edge AI. The implementation specifically addresses the optimization strategies required to overcome I/O bandwidth constraints and memory wall bottlenecks inherent in high-throughput time-series classification. By utilizing a optimized spatial configuration, the pipeline demonstrates how localized Data Movement Accelerators (DMAs) can be programmed to sustain parallel compute cycles without host CPU intervention.
 
 Phase 1: Standard Environment Setup for AMD Ryzen AI
 
