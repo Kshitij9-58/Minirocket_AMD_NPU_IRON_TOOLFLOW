@@ -4,7 +4,7 @@
 
 ### This project implements MiniROCKET training and inference natively on an AMD NPU using the AMD IRON API and MLIR-AIE toolchain. By mapping the convolutional transforms and linear inference directly onto the dedicated spatial architecture of the AIE Tile array, this work explores the practical limits of bare-metal edge AI. The implementation specifically addresses the optimization strategies required to overcome I/O bandwidth constraints and memory wall bottlenecks inherent in high-throughput time-series classification. By utilizing a optimized spatial configuration, the pipeline demonstrates how localized Data Movement Accelerators (DMAs) can be programmed to sustain parallel compute cycles without host CPU intervention.
 
-### Phase 1: Standard Environment Setup for AMD Ryzen AI
+## Phase 1: Standard Environment Setup for AMD Ryzen AI
 
 The execution of programs on the Ryzen AI NPU requires a specific software configuration on Ubuntu 24.04.
 
@@ -14,7 +14,7 @@ SecureBoot must be disabled in BIOS to permit unsigned driver installation.
 
 Upgrade the Linux kernel to 6.11 or higher.
 
-#### Updates the local package lists
+### Updates the local package lists
 sudo apt update
 
 # Installs Ubuntu Hardware Enablement stack
