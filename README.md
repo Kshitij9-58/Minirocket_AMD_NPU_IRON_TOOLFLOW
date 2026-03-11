@@ -1,4 +1,4 @@
-### MiniROCKET Implementation on AMD XDNA NPU (IRON Toolflow)
+# MiniROCKET Implementation on AMD XDNA NPU (IRON Toolflow)
 
 ## This repository contains the bare metal implementation of the MiniROCKET time series classifier on an AMD Ryzen AI Neural Processing Unit (NPU). ROCKET is a time series classifier published in 2020 that achieves state-of-the-art accuracy with a fraction of the computational expense by transforming input time series using random convolutional kernels. MiniROCKET introduces engineering improvements that make the algorithm nearly deterministic and exceptionally fast, running ~75× faster on large datasets. The AMD NPU is a dedicated AI engine within AMD's Ryzen processors. It accelerates machine learning tasks, particularly inference, by offloading computationally intensive workloads from the CPU.
 
