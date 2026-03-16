@@ -51,7 +51,7 @@ int main(int argc, char *argv[]) {
         std::vector<uint32_t> instr_v = load_instr_binary(insts_path);
         int VOLUME = MATRIX_SIZE * MATRIX_SIZE;
         
-        // --- 8-ARGUMENT BUFFER SETUP (Matching test.cpp) ---
+        // --- 8-ARGUMENT BUFFER SETUP ---
         // Arg 0: Opcode (Scalar 3) - No BO needed
         // Arg 1: Instructions (Group 1)
         auto bo_instr = xrt::bo(device, instr_v.size() * sizeof(uint32_t), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
@@ -96,7 +96,7 @@ int main(int argc, char *argv[]) {
 
         std::cout << "Dispatching Kernel (Opcode 3)..." << std::endl;
         
-        // The Magic 8-Argument Call
+        // The 8-Argument Call
         unsigned int opcode = 3;
         auto run = kernel(opcode, bo_instr, instr_v.size(), bo_a, bo_b, bo_out, bo_tmp, bo_trace);
         run.wait();
