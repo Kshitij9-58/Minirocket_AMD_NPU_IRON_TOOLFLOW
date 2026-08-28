@@ -48,6 +48,17 @@ TOTAL_FEATURES = 840
 FEATURES_PER_TILE = 420  # 2-tile split, matches existing transform's FEATURES_PER_CORE
 DEVICE_SYMBOL = "npu1"
 
+# TEST_FEATURE_LIMIT: if set (not None), each tile only processes this many
+# features instead of the full FEATURES_PER_TILE (420). Used for small-scale
+# validation builds (Step 3 gate) before committing to the full 420-feature
+# unroll, which has proven too slow/unreliable to compile in two attempts
+# tonight. Output buffer sizes and DMA transfer sizes shrink to match --
+# this is a genuinely smaller kernel, not a truncated run of the full one,
+# so it validates structure/correctness cheaply without being representative
+# of full-scale compile time.
+TEST_FEATURE_LIMIT = 8
+ACTIVE_FEATURES_PER_TILE = TEST_FEATURE_LIMIT if TEST_FEATURE_LIMIT is not None else FEATURES_PER_TILE
+
 KERNEL_INDICES = list(combinations(range(KERNEL_TAPS), 3))
 assert len(KERNEL_INDICES) == NUM_KERNEL_INDICES
 
@@ -81,7 +92,28 @@ def build_feature_schedule():
 
 def generate_mlir():
     schedule = build_feature_schedule()
-    tile_schedules = [schedule[:FEATURES_PER_TILE], schedule[FEATURES_PER_TILE:]]
+    # Truncate each tile's schedule to ACTIVE_FEATURES_PER_TILE (8 for this
+    # small-scale validation build, 420 for the real full design) -- slices
+    # taken from the START of each tile's real 420-feature block, so the
+    # dilation/kernel-index values tested here are genuine early entries
+    # from the real schedule, not synthetic placeholders.
+    tile_schedules = [
+        schedule[:FEATURES_PER_TILE][:ACTIVE_FEATURES_PER_TILE],
+        schedule[FEATURES_PER_TILE:][:ACTIVE_FEATURES_PER_TILE],
+    ]
+
+    # Combined input layout per tile: [series(SEQ_LENGTH) | bias(FEATURES_PER_TILE)
+    # | smean(FEATURES_PER_TILE) | sscale(FEATURES_PER_TILE)], one flat buffer.
+    # Consolidating 4 separate input ObjectFifos into 1 avoids exceeding the
+    # shim tile's output DMA channel limit (confirmed via a real aiecc.py
+    # failure -- "number of output DMA channel exceeded" -- when this kernel
+    # used 4 input streams + 1 output stream per column; the proven
+    # dotproduct12_v3.mlir classifier only ever uses 2 in + 1 out per column).
+    COMBINED_IN_LEN = SEQ_LENGTH + 3 * ACTIVE_FEATURES_PER_TILE
+    SERIES_OFFSET = 0
+    BIAS_OFFSET = SEQ_LENGTH
+    SMEAN_OFFSET = SEQ_LENGTH + ACTIVE_FEATURES_PER_TILE
+    SSCALE_OFFSET = SEQ_LENGTH + 2 * ACTIVE_FEATURES_PER_TILE
 
     lines = []
     w = lines.append
@@ -91,43 +123,27 @@ def generate_mlir():
     w(f"    func.func private @zero_i32_scalar(memref<1xi32>)")
     w(
         f"    func.func private @minirocket_feature_transform("
-        f"memref<{SEQ_LENGTH}xi32>, i32, i32, i32, i32, i32, i32, i32, i32, i32, memref<1xi32>)"
+        f"memref<{COMBINED_IN_LEN}xi32>, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, "
+        f"memref<{ACTIVE_FEATURES_PER_TILE}xi32>, i32)"
     )
     w("")
 
     # --- Tiles: 2 columns (0, 1), one compute tile each (row 2) ---
-    # NOTE: shim(row0)/mem(row1)/compute(row2) per column, matching the
-    # classifier's per-column staging pattern but with only 1 compute
-    # tile per column here (vs. classifier's 4), since transform stays
-    # at 2 total compute tiles.
     for col in range(2):
         w(f"    %shim_noc_tile_{col}_0 = aie.tile({col}, 0)")
         w(f"    %mem_tile_{col}_1 = aie.tile({col}, 1)")
         w(f"    %tile_{col}_2 = aie.tile({col}, 2)")
     w("")
 
-    # --- Routing: per column, series/bias/scaler_mean/scaler_scale in,
-    # normalized-feature out ---
+    # --- Routing: per column, ONE combined input stream, ONE output stream ---
     for col in range(2):
         w(f"    // --- ROUTING: COLUMN {col} (transform tile {col}) ---")
-        w(f"    aie.objectfifo @series_in_{col}(%shim_noc_tile_{col}_0, {{%mem_tile_{col}_1}}, 2 : i32) : !aie.objectfifo<memref<{SEQ_LENGTH}xi32>>")
-        w(f"    aie.objectfifo @series_mem_{col}(%mem_tile_{col}_1, {{%tile_{col}_2}}, 2 : i32) : !aie.objectfifo<memref<{SEQ_LENGTH}xi32>>")
-        w(f"    aie.objectfifo.link [@series_in_{col}] -> [@series_mem_{col}]([] [])")
+        w(f"    aie.objectfifo @in_{col}(%shim_noc_tile_{col}_0, {{%mem_tile_{col}_1}}, 2 : i32) : !aie.objectfifo<memref<{COMBINED_IN_LEN}xi32>>")
+        w(f"    aie.objectfifo @in_mem_{col}(%mem_tile_{col}_1, {{%tile_{col}_2}}, 2 : i32) : !aie.objectfifo<memref<{COMBINED_IN_LEN}xi32>>")
+        w(f"    aie.objectfifo.link [@in_{col}] -> [@in_mem_{col}]([] [])")
 
-        w(f"    aie.objectfifo @bias_in_{col}(%shim_noc_tile_{col}_0, {{%mem_tile_{col}_1}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"    aie.objectfifo @bias_mem_{col}(%mem_tile_{col}_1, {{%tile_{col}_2}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"    aie.objectfifo.link [@bias_in_{col}] -> [@bias_mem_{col}]([] [])")
-
-        w(f"    aie.objectfifo @smean_in_{col}(%shim_noc_tile_{col}_0, {{%mem_tile_{col}_1}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"    aie.objectfifo @smean_mem_{col}(%mem_tile_{col}_1, {{%tile_{col}_2}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"    aie.objectfifo.link [@smean_in_{col}] -> [@smean_mem_{col}]([] [])")
-
-        w(f"    aie.objectfifo @sscale_in_{col}(%shim_noc_tile_{col}_0, {{%mem_tile_{col}_1}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"    aie.objectfifo @sscale_mem_{col}(%mem_tile_{col}_1, {{%tile_{col}_2}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"    aie.objectfifo.link [@sscale_in_{col}] -> [@sscale_mem_{col}]([] [])")
-
-        w(f"    aie.objectfifo @out_mem_{col}(%tile_{col}_2, {{%mem_tile_{col}_1}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"    aie.objectfifo @out_{col}(%mem_tile_{col}_1, {{%shim_noc_tile_{col}_0}}, 2 : i32) : !aie.objectfifo<memref<{FEATURES_PER_TILE}xi32>>")
+        w(f"    aie.objectfifo @out_mem_{col}(%tile_{col}_2, {{%mem_tile_{col}_1}}, 2 : i32) : !aie.objectfifo<memref<{ACTIVE_FEATURES_PER_TILE}xi32>>")
+        w(f"    aie.objectfifo @out_{col}(%mem_tile_{col}_1, {{%shim_noc_tile_{col}_0}}, 2 : i32) : !aie.objectfifo<memref<{ACTIVE_FEATURES_PER_TILE}xi32>>")
         w(f"    aie.objectfifo.link [@out_mem_{col}] -> [@out_{col}]([] [])")
         w("")
 
@@ -143,17 +159,29 @@ def generate_mlir():
         w("      %c0 = arith.constant 0 : index")
         w("      %c4294967295 = arith.constant 4294967295 : index")
         w("      %c1 = arith.constant 1 : index")
+        w(f"      %c_series_off = arith.constant {SERIES_OFFSET} : i32")
+        w("")
+
+        # NO memref.alloc() anywhere in this core body -- confirmed via
+        # real hardware failure ("could not find free space for
+        # SpaceSymbol _ZL4pool in memory DMb") that memref.alloc() lowers
+        # to a heap allocation requiring libc's malloc pool, and this
+        # AIE-ML tile's 4 local memory banks (64KB total) are already
+        # fully claimed by the toolchain's own default static
+        # allocations, leaving no room for a heap pool. Confirmed by
+        # comparing against the proven dotproduct12_v3.mlir classifier,
+        # whose map files contain NO _ZL4pool/malloc symbols at all,
+        # because it never calls memref.alloc() -- only reads/writes
+        # ObjectFifo-provided buffers directly. This version does the
+        # same: minirocket_feature_transform() now takes the FULL
+        # combined input buffer + a series offset, and the FULL output
+        # buffer + a target index, doing its own pointer arithmetic in
+        # C++ rather than requiring MLIR-side scratch copies.
         w("      scf.for %arg0 = %c0 to %c4294967295 step %c1 {")
-        w(f"        %series = aie.objectfifo.acquire @series_mem_{col}(Consume, 1) : !aie.objectfifosubview<memref<{SEQ_LENGTH}xi32>>")
-        w(f"        %series_v = aie.objectfifo.subview.access %series[0] : !aie.objectfifosubview<memref<{SEQ_LENGTH}xi32>> -> memref<{SEQ_LENGTH}xi32>")
-        w(f"        %bias = aie.objectfifo.acquire @bias_mem_{col}(Consume, 1) : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"        %bias_v = aie.objectfifo.subview.access %bias[0] : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>> -> memref<{FEATURES_PER_TILE}xi32>")
-        w(f"        %smean = aie.objectfifo.acquire @smean_mem_{col}(Consume, 1) : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"        %smean_v = aie.objectfifo.subview.access %smean[0] : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>> -> memref<{FEATURES_PER_TILE}xi32>")
-        w(f"        %sscale = aie.objectfifo.acquire @sscale_mem_{col}(Consume, 1) : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"        %sscale_v = aie.objectfifo.subview.access %sscale[0] : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>> -> memref<{FEATURES_PER_TILE}xi32>")
-        w(f"        %out = aie.objectfifo.acquire @out_mem_{col}(Produce, 1) : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>>")
-        w(f"        %out_v = aie.objectfifo.subview.access %out[0] : !aie.objectfifosubview<memref<{FEATURES_PER_TILE}xi32>> -> memref<{FEATURES_PER_TILE}xi32>")
+        w(f"        %in_elem = aie.objectfifo.acquire @in_mem_{col}(Consume, 1) : !aie.objectfifosubview<memref<{COMBINED_IN_LEN}xi32>>")
+        w(f"        %in_v = aie.objectfifo.subview.access %in_elem[0] : !aie.objectfifosubview<memref<{COMBINED_IN_LEN}xi32>> -> memref<{COMBINED_IN_LEN}xi32>")
+        w(f"        %out = aie.objectfifo.acquire @out_mem_{col}(Produce, 1) : !aie.objectfifosubview<memref<{ACTIVE_FEATURES_PER_TILE}xi32>>")
+        w(f"        %out_v = aie.objectfifo.subview.access %out[0] : !aie.objectfifosubview<memref<{ACTIVE_FEATURES_PER_TILE}xi32>> -> memref<{ACTIVE_FEATURES_PER_TILE}xi32>")
         w("")
 
         for feat_idx, entry in enumerate(tile_schedule):
@@ -162,31 +190,35 @@ def generate_mlir():
             i0, i1, i2 = entry["kernel_i0"], entry["kernel_i1"], entry["kernel_i2"]
             padding1 = entry["padding1"]
 
+            bias_idx = BIAS_OFFSET + feat_idx
+            smean_idx = SMEAN_OFFSET + feat_idx
+            sscale_idx = SSCALE_OFFSET + feat_idx
+
             w(f"        // feature {feat_idx}: dilation={dilation} padding={padding} kernel=({i0},{i1},{i2}) padding1={padding1}")
             w(f"        %fidx_{feat_idx} = arith.constant {feat_idx} : index")
-            w(f"        %bias_{feat_idx} = memref.load %bias_v[%fidx_{feat_idx}] : memref<{FEATURES_PER_TILE}xi32>")
-            w(f"        %smean_{feat_idx} = memref.load %smean_v[%fidx_{feat_idx}] : memref<{FEATURES_PER_TILE}xi32>")
-            w(f"        %sscale_{feat_idx} = memref.load %sscale_v[%fidx_{feat_idx}] : memref<{FEATURES_PER_TILE}xi32>")
-            w(f"        %out_slot_{feat_idx} = memref.subview %out_v[%fidx_{feat_idx}] [1] [1] : memref<{FEATURES_PER_TILE}xi32> to memref<1xi32, strided<[1], offset: ?>>")
+            w(f"        %bidx_{feat_idx} = arith.constant {bias_idx} : index")
+            w(f"        %smidx_{feat_idx} = arith.constant {smean_idx} : index")
+            w(f"        %ssidx_{feat_idx} = arith.constant {sscale_idx} : index")
+            w(f"        %bias_{feat_idx} = memref.load %in_v[%bidx_{feat_idx}] : memref<{COMBINED_IN_LEN}xi32>")
+            w(f"        %smean_{feat_idx} = memref.load %in_v[%smidx_{feat_idx}] : memref<{COMBINED_IN_LEN}xi32>")
+            w(f"        %sscale_{feat_idx} = memref.load %in_v[%ssidx_{feat_idx}] : memref<{COMBINED_IN_LEN}xi32>")
             w(f"        %dilation_{feat_idx} = arith.constant {dilation} : i32")
             w(f"        %padding_{feat_idx} = arith.constant {padding} : i32")
             w(f"        %ki0_{feat_idx} = arith.constant {i0} : i32")
             w(f"        %ki1_{feat_idx} = arith.constant {i1} : i32")
             w(f"        %ki2_{feat_idx} = arith.constant {i2} : i32")
             w(f"        %pad1_{feat_idx} = arith.constant {padding1} : i32")
+            w(f"        %outidx_{feat_idx} = arith.constant {feat_idx} : i32")
             w(
-                f"        func.call @minirocket_feature_transform(%series_v, %bias_{feat_idx}, "
+                f"        func.call @minirocket_feature_transform(%in_v, %c_series_off, %bias_{feat_idx}, "
                 f"%smean_{feat_idx}, %sscale_{feat_idx}, %dilation_{feat_idx}, %padding_{feat_idx}, "
-                f"%ki0_{feat_idx}, %ki1_{feat_idx}, %ki2_{feat_idx}, %pad1_{feat_idx}, %out_slot_{feat_idx}) : "
-                f"(memref<{SEQ_LENGTH}xi32>, i32, i32, i32, i32, i32, i32, i32, i32, i32, "
-                f"memref<1xi32, strided<[1], offset: ?>>) -> ()"
+                f"%ki0_{feat_idx}, %ki1_{feat_idx}, %ki2_{feat_idx}, %pad1_{feat_idx}, %out_v, %outidx_{feat_idx}) : "
+                f"(memref<{COMBINED_IN_LEN}xi32>, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, "
+                f"memref<{ACTIVE_FEATURES_PER_TILE}xi32>, i32) -> ()"
             )
             w("")
 
-        w(f"        aie.objectfifo.release @series_mem_{col}(Consume, 1)")
-        w(f"        aie.objectfifo.release @bias_mem_{col}(Consume, 1)")
-        w(f"        aie.objectfifo.release @smean_mem_{col}(Consume, 1)")
-        w(f"        aie.objectfifo.release @sscale_mem_{col}(Consume, 1)")
+        w(f"        aie.objectfifo.release @in_mem_{col}(Consume, 1)")
         w(f"        aie.objectfifo.release @out_mem_{col}(Produce, 1)")
         w("      }")
         w("      aie.end")
@@ -194,25 +226,26 @@ def generate_mlir():
     w("")
 
     # --- Runtime sequence ---
+    # Host is responsible for building each tile's combined input buffer
+    # as [series | bias_slice | smean_slice | sscale_slice] (COMBINED_IN_LEN
+    # elements, matching SERIES_OFFSET/BIAS_OFFSET/SMEAN_OFFSET/SSCALE_OFFSET
+    # above) BEFORE calling this kernel -- this is a real, new packing
+    # requirement for the host driver, not something the existing project
+    # drivers already do; matches the classifier's own precedent of the
+    # host doing all data layout work before dispatch (see main_kernels.json
+    # convention in dotproduct12_v3.mlir's runtime_sequence).
     w("    // --- HOST RUNTIME SEQUENCE ---")
     w(
-        f"    aie.runtime_sequence(%arg0: memref<{SEQ_LENGTH * 2}xi32>, "
-        f"%arg1: memref<{TOTAL_FEATURES}xi32>, %arg2: memref<{TOTAL_FEATURES}xi32>, "
-        f"%arg3: memref<{TOTAL_FEATURES}xi32>, %arg4: memref<{TOTAL_FEATURES}xi32>) {{"
+        f"    aie.runtime_sequence(%arg0: memref<{COMBINED_IN_LEN * 2}xi32>, "
+        f"%arg1: memref<{ACTIVE_FEATURES_PER_TILE * 2}xi32>) {{"
     )
     dma_id = 0
     for col in range(2):
-        series_off = col * SEQ_LENGTH
-        feat_off = col * FEATURES_PER_TILE
-        w(f"      aiex.npu.dma_memcpy_nd(%arg0[0, 0, 0, {series_off}][1, 1, 1, {SEQ_LENGTH}][0, 0, 0, 1]) {{id = {dma_id} : i64, metadata = @series_in_{col}}} : memref<{SEQ_LENGTH * 2}xi32>")
+        in_off = col * COMBINED_IN_LEN
+        feat_off = col * ACTIVE_FEATURES_PER_TILE
+        w(f"      aiex.npu.dma_memcpy_nd(%arg0[0, 0, 0, {in_off}][1, 1, 1, {COMBINED_IN_LEN}][0, 0, 0, 1]) {{id = {dma_id} : i64, metadata = @in_{col}}} : memref<{COMBINED_IN_LEN * 2}xi32>")
         dma_id += 1
-        w(f"      aiex.npu.dma_memcpy_nd(%arg1[0, 0, 0, {feat_off}][1, 1, 1, {FEATURES_PER_TILE}][0, 0, 0, 1]) {{id = {dma_id} : i64, metadata = @bias_in_{col}}} : memref<{TOTAL_FEATURES}xi32>")
-        dma_id += 1
-        w(f"      aiex.npu.dma_memcpy_nd(%arg2[0, 0, 0, {feat_off}][1, 1, 1, {FEATURES_PER_TILE}][0, 0, 0, 1]) {{id = {dma_id} : i64, metadata = @smean_in_{col}}} : memref<{TOTAL_FEATURES}xi32>")
-        dma_id += 1
-        w(f"      aiex.npu.dma_memcpy_nd(%arg3[0, 0, 0, {feat_off}][1, 1, 1, {FEATURES_PER_TILE}][0, 0, 0, 1]) {{id = {dma_id} : i64, metadata = @sscale_in_{col}}} : memref<{TOTAL_FEATURES}xi32>")
-        dma_id += 1
-        w(f"      aiex.npu.dma_memcpy_nd(%arg4[0, 0, 0, {feat_off}][1, 1, 1, {FEATURES_PER_TILE}][0, 0, 0, 1]) {{id = {dma_id} : i64, metadata = @out_{col}}} : memref<{TOTAL_FEATURES}xi32>")
+        w(f"      aiex.npu.dma_memcpy_nd(%arg1[0, 0, 0, {feat_off}][1, 1, 1, {ACTIVE_FEATURES_PER_TILE}][0, 0, 0, 1]) {{id = {dma_id} : i64, metadata = @out_{col}}} : memref<{ACTIVE_FEATURES_PER_TILE * 2}xi32>")
         dma_id += 1
     for col in range(2):
         w(f"      aiex.npu.dma_wait {{symbol = @out_{col}}}")
@@ -229,6 +262,11 @@ if __name__ == "__main__":
         f.write(mlir_text)
     n_lines = mlir_text.count("\n")
     print(f"Wrote minirocket_transform_v1.mlir ({n_lines} lines)")
-    print(f"2 columns x 1 compute tile = 2 compute tiles, {FEATURES_PER_TILE} features/tile, "
-          f"{TOTAL_FEATURES} total features")
+    if TEST_FEATURE_LIMIT is not None:
+        print(f"*** TEST-SCALE BUILD *** {ACTIVE_FEATURES_PER_TILE} features/tile "
+              f"(real design: {FEATURES_PER_TILE} features/tile, {TOTAL_FEATURES} total) --")
+        print(f"    set TEST_FEATURE_LIMIT = None for the full-scale build.")
+    else:
+        print(f"2 columns x 1 compute tile = 2 compute tiles, {FEATURES_PER_TILE} features/tile, "
+              f"{TOTAL_FEATURES} total features")
     print("Path A: one minirocket_feature_transform() call per feature, no cross-feature caching")
