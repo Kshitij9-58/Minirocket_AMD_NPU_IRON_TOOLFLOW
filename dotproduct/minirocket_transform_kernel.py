@@ -37,6 +37,8 @@ file for the standalone, independently-verified version: 840 entries,
 correct per-dilation counts, all padding values valid for SEQ_LENGTH=251).
 """
 
+import argparse
+import os
 from itertools import combinations
 
 SEQ_LENGTH = 251
@@ -56,8 +58,25 @@ DEVICE_SYMBOL = "npu1"
 # this is a genuinely smaller kernel, not a truncated run of the full one,
 # so it validates structure/correctness cheaply without being representative
 # of full-scale compile time.
-TEST_FEATURE_LIMIT = 8
+TEST_FEATURE_LIMIT = None
 ACTIVE_FEATURES_PER_TILE = TEST_FEATURE_LIMIT if TEST_FEATURE_LIMIT is not None else FEATURES_PER_TILE
+
+# Absolute path to the compiled .o file, resolved at GENERATION time from
+# the current working directory. A bare filename ("minirocket_transform_kernel.o")
+# was tried first and failed with "undefined symbol" across multiple
+# real aiecc.py runs even when the .o file genuinely existed in the same
+# directory as the .mlir -- xchesscc's link_with resolution appears to
+# need either an absolute path or a path relative to wherever it's
+# actually invoked from (which may be a nested work/ subdirectory, not
+# the directory containing the .mlir). An absolute path removes the
+# ambiguity entirely regardless of invocation directory. IMPORTANT: this
+# means minirocket_transform_kernel.py MUST be run from the SAME
+# directory where minirocket_transform_kernel.o will be compiled (i.e.
+# run `python3 minirocket_transform_kernel.py` from inside
+# transform_v1_build/ on wolverine, not from some other directory and
+# copied over afterward) -- otherwise this path will point to a
+# location that doesn't match where the .o actually ends up.
+LINK_WITH_OBJ_PATH = os.path.join(os.getcwd(), "minirocket_transform_kernel.o")
 
 KERNEL_INDICES = list(combinations(range(KERNEL_TAPS), 3))
 assert len(KERNEL_INDICES) == NUM_KERNEL_INDICES
@@ -122,9 +141,9 @@ def generate_mlir():
     w(f"  aie.device({DEVICE_SYMBOL}) {{")
     w(f"    func.func private @zero_i32_scalar(memref<1xi32>)")
     w(
-        f"    func.func private @minirocket_feature_transform("
+        f'    func.func private @minirocket_feature_transform('
         f"memref<{COMBINED_IN_LEN}xi32>, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, "
-        f"memref<{ACTIVE_FEATURES_PER_TILE}xi32>, i32)"
+        f'memref<{ACTIVE_FEATURES_PER_TILE}xi32>, i32)'
     )
     w("")
 
@@ -222,7 +241,7 @@ def generate_mlir():
         w(f"        aie.objectfifo.release @out_mem_{col}(Produce, 1)")
         w("      }")
         w("      aie.end")
-        w("    } {stack_size = 4096 : i32}")
+        w('    } {stack_size = 4096 : i32, link_with = "minirocket_transform_kernel.o"}')
     w("")
 
     # --- Runtime sequence ---
