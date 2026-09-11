@@ -1,31 +1,18 @@
-// transform_test8_runner.cpp
+// transform_datadriven_test8_runner.cpp
 //
-// Dispatches the test-scale (8 features/tile) real MiniROCKET transform
-// kernel and reads back its 16 output values (8 per tile x 2 tiles).
-//
-// Structure mirrors dotprod12_runner.cpp exactly -- same XRT setup
-// sequence, same 8-argument DPU convention (opcode, instr_bo,
-// instr_size, then real buffers, then dummy placeholders), same
-// sync/read pattern. Only the buffer count/sizes and data types differ:
-// this kernel takes ONE combined int32 input buffer and produces ONE
-// int32 output buffer, versus the classifier's two bf16 inputs and one
-// float output.
-//
-// Input buffer layout (must match the MLIR generator's convention):
-//   per tile: [series(251) | bias(8) | smean(8) | sscale(8)] = 275 int32
-//   full buffer: tile0's 275, then tile1's 275 = 550 int32
-// All values scaled by 1000 (the project's fixed-point convention).
-//
-// Output: 16 int32 values (tile0's 8, then tile1's 8), each a
-// normalized feature value scaled by 1000.
+// Same XRT structure as transform_test8_runner.cpp (itself modeled on
+// the proven dotprod12_runner.cpp pattern), updated for the data-driven
+// design's larger combined input buffer (now includes a parameter array
+// per feature: dilation, padding, kernel_i0, kernel_i1, kernel_i2,
+// padding1).
 //
 // Build:
-//   g++ -std=c++17 -o transform_test8_runner transform_test8_runner.cpp \
+//   g++ -std=c++17 -o transform_datadriven_test8_runner transform_datadriven_test8_runner.cpp \
 //       -I/opt/xilinx/xrt/include -L/opt/xilinx/xrt/lib -lxrt_coreutil -luuid
 //
 // Run:
-//   ./transform_test8_runner -x transform_test8.xclbin \
-//       -i transform_test8_sequence.bin -d combined_input.txt
+//   ./transform_datadriven_test8_runner -x transform_datadriven_test8.xclbin \
+//       -i transform_datadriven_test8_sequence.bin -d combined_input_datadriven.txt
 
 #include <iostream>
 #include <fstream>
@@ -42,11 +29,12 @@
 using DATA_TYPE = int32_t;
 
 const int SEQ_LENGTH = 251;
-const int FEATURES_PER_TILE = 8;      // TEST_FEATURE_LIMIT
+const int FEATURES_PER_TILE = 8;
+const int PARAMS_PER_FEATURE = 6;
 const int NUM_TILES = 2;
-const int COMBINED_IN_LEN = SEQ_LENGTH + 3 * FEATURES_PER_TILE;  // 275
-const int TOTAL_IN_LEN = COMBINED_IN_LEN * NUM_TILES;            // 550
-const int TOTAL_OUT_LEN = FEATURES_PER_TILE * NUM_TILES;         // 16
+const int COMBINED_IN_LEN = SEQ_LENGTH + 3 * FEATURES_PER_TILE + FEATURES_PER_TILE * PARAMS_PER_FEATURE;  // 323
+const int TOTAL_IN_LEN = COMBINED_IN_LEN * NUM_TILES;  // 646
+const int TOTAL_OUT_LEN = FEATURES_PER_TILE * NUM_TILES;  // 16
 
 std::vector<uint32_t> load_instr_binary(const std::string &filename) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -60,10 +48,10 @@ std::vector<uint32_t> load_instr_binary(const std::string &filename) {
 }
 
 int main(int argc, char *argv[]) {
-    std::string xclbin_path = "transform_test8.xclbin";
-    std::string insts_path = "transform_test8_sequence.bin";
+    std::string xclbin_path = "transform_datadriven_test8.xclbin";
+    std::string insts_path = "transform_datadriven_test8_sequence.bin";
     std::string kernel_name = "MLIR_AIE";
-    std::string input_file = "combined_input.txt";
+    std::string input_file = "combined_input_datadriven.txt";
     int num_iterations = 1;
 
     for (int i = 1; i < argc; i++) {
@@ -90,16 +78,10 @@ int main(int argc, char *argv[]) {
                               XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
         auto bo_out = xrt::bo(device, TOTAL_OUT_LEN * sizeof(DATA_TYPE),
                                XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
-        // Dummy placeholder buffers -- the DPU kernel wrapper always
-        // expects 8 arguments regardless of how many the MLIR
-        // runtime_sequence actually declares (established project
-        // convention, see dotprod12_runner.cpp which uses bo_tmp/bo_trace
-        // for the same reason).
         auto bo_dummy1 = xrt::bo(device, 4096, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
         auto bo_dummy2 = xrt::bo(device, 4096, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(6));
         auto bo_dummy3 = xrt::bo(device, 4096, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(7));
 
-        // Load the combined input buffer (one int32 per line, 550 values)
         std::vector<DATA_TYPE> raw_in(TOTAL_IN_LEN, 0);
         std::ifstream fileIn(input_file);
         if (!fileIn) throw std::runtime_error("Missing " + input_file);
@@ -119,7 +101,6 @@ int main(int argc, char *argv[]) {
         bo_instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         bo_in.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-        // Timed dispatch loop
         auto start = std::chrono::high_resolution_clock::now();
         for (int iter = 0; iter < num_iterations; iter++) {
             auto run = kernel(static_cast<unsigned int>(3), bo_instr, instr_v.size(),
@@ -147,6 +128,14 @@ int main(int argc, char *argv[]) {
         std::cout << "Total time: " << total_ms << " ms" << std::endl;
         std::cout << "Per-dispatch: " << (total_ms / num_iterations) << " ms" << std::endl;
         std::cout << "\nNPU Transform Execution Success." << std::endl;
+
+        // Write results to a plain file for the Python comparison script
+        std::ofstream outFile("npu_output_datadriven.txt");
+        for (int i = 0; i < TOTAL_OUT_LEN; i++) {
+            outFile << results[i] << "\n";
+        }
+        outFile.close();
+        std::cout << "Wrote results to npu_output_datadriven.txt" << std::endl;
 
     } catch (const std::exception& e) {
         std::cerr << "ERROR: " << e.what() << std::endl;

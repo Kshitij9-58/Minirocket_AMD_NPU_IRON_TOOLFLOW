@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-prep_and_verify_test8.py
+prep_and_verify_datadriven_test8.py
 
-Two jobs:
-  1. Build combined_input.txt -- the input buffer the transform kernel
-     expects, packed in its exact layout, from real test data.
-  2. Compute the CPU reference values for the same 16 features, so the
-     NPU output can be compared against ground truth.
+Data-driven design version: combined input buffer now includes a
+parameter array [dilation, padding, kernel_i0, kernel_i1, kernel_i2,
+padding1] per feature, in addition to series/bias/smean/sscale.
 
-Run BEFORE transform_test8_runner (to make combined_input.txt), then
-again with --compare after (to check the NPU's output).
+Layout per tile: [series(251) | bias(F) | smean(F) | sscale(F) | params(F*6)]
+where F = TEST_FEATURE_LIMIT = 8.
 
 Usage:
-  python3 prep_and_verify_test8.py                       # generate input + print reference
-  python3 prep_and_verify_test8.py --compare npu_out.txt # compare NPU output to reference
+  python3 prep_and_verify_datadriven_test8.py                        # generate input + print reference
+  python3 prep_and_verify_datadriven_test8.py --compare npu_out.txt  # compare NPU output to reference
 """
 
 import argparse
@@ -29,6 +27,7 @@ NUM_KERNEL_INDICES = 84
 KERNEL_TAPS = 9
 FEATURES_PER_TILE_FULL = 420
 TEST_FEATURE_LIMIT = 8
+PARAMS_PER_FEATURE = 6
 SCALE = 1000
 CLIP_VAL = 3.0
 
@@ -56,19 +55,13 @@ def build_feature_schedule():
 
 def cpu_reference_feature_fixedpoint(x_scaled, bias_scaled, dilation, padding,
                                       i0, i1, i2, padding1):
-    """Mirrors minirocket_transform_kernel.cc EXACTLY, including its
-    integer arithmetic, so the comparison is apples-to-apples with what
-    the NPU actually computes (not the float reference, which would
-    differ slightly due to fixed-point rounding)."""
     x = x_scaled.astype(np.int64)
     A = -x
     G = x + x + x
-
     C = A.copy()
     center = KERNEL_TAPS // 2
     if center in (i0, i1, i2):
         C = C + G
-
     end = SEQ_LENGTH - padding
     for gamma_index in range(center):
         needed = gamma_index in (i0, i1, i2)
@@ -77,7 +70,6 @@ def cpu_reference_feature_fixedpoint(x_scaled, bias_scaled, dilation, padding,
         if needed:
             C[dst] += G[:end]
         end += dilation
-
     start = dilation
     for gamma_index in range(center + 1, KERNEL_TAPS):
         needed = gamma_index in (i0, i1, i2)
@@ -91,7 +83,6 @@ def cpu_reference_feature_fixedpoint(x_scaled, bias_scaled, dilation, padding,
     else:
         range_start, range_end = padding, SEQ_LENGTH - padding
     n_samples = range_end - range_start
-
     count = int(np.sum(C[range_start:range_end] > bias_scaled))
     ppv_scaled = (count * SCALE) // n_samples
     return ppv_scaled
@@ -102,9 +93,8 @@ def main():
     ap.add_argument("--model", default="minirocket_model.json")
     ap.add_argument("--test-data", default="minirocket_model_test_data.json")
     ap.add_argument("--sample-index", type=int, default=0)
-    ap.add_argument("--out", default="combined_input.txt")
-    ap.add_argument("--compare", default=None,
-                     help="Path to file with NPU output (16 int values), to compare against reference")
+    ap.add_argument("--out", default="combined_input_datadriven.txt")
+    ap.add_argument("--compare", default=None)
     args = ap.parse_args()
 
     with open(args.model) as f:
@@ -132,15 +122,22 @@ def main():
 
     x_scaled = np.round(x_sample * SCALE).astype(np.int64)
 
-    # --- Build combined input buffer ---
+    # --- Build combined input buffer: [series|bias|smean|sscale|params] per tile ---
     combined = []
     for t in range(2):
         combined.extend(x_scaled.tolist())
         combined.extend(np.round(tiles[t]["bias"] * SCALE).astype(np.int64).tolist())
         combined.extend(np.round(tiles[t]["smean"] * SCALE).astype(np.int64).tolist())
         combined.extend(np.round(tiles[t]["sscale"] * SCALE).astype(np.int64).tolist())
+        # params: [dilation, padding, kernel_i0, kernel_i1, kernel_i2, padding1] per feature
+        for entry in tiles[t]["schedule"]:
+            combined.extend([
+                entry["dilation"], entry["padding"],
+                entry["kernel_i0"], entry["kernel_i1"], entry["kernel_i2"],
+                entry["padding1"],
+            ])
 
-    expected_len = 2 * (SEQ_LENGTH + 3 * TEST_FEATURE_LIMIT)
+    expected_len = 2 * (SEQ_LENGTH + 3 * TEST_FEATURE_LIMIT + TEST_FEATURE_LIMIT * PARAMS_PER_FEATURE)
     assert len(combined) == expected_len, f"expected {expected_len}, got {len(combined)}"
 
     with open(args.out, "w") as f:
@@ -179,8 +176,6 @@ def main():
                 if line:
                     npu_vals.append(int(line))
         print(f"\n=== COMPARISON (loaded {len(npu_vals)} NPU values) ===")
-        if len(npu_vals) != len(reference):
-            print(f"WARNING: count mismatch -- reference has {len(reference)}, NPU file has {len(npu_vals)}")
         n = min(len(npu_vals), len(reference))
         mismatches = 0
         for i in range(n):
