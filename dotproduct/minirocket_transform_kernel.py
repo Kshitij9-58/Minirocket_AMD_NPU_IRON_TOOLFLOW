@@ -38,7 +38,7 @@ assert len(KERNEL_INDICES) == NUM_KERNEL_INDICES
 
 # TEST_FEATURE_LIMIT: if set, each tile only processes this many
 # features (for validation builds). None = full 420/tile design.
-TEST_FEATURE_LIMIT = 8
+TEST_FEATURE_LIMIT = None
 ACTIVE_FEATURES_PER_TILE = TEST_FEATURE_LIMIT if TEST_FEATURE_LIMIT is not None else FEATURES_PER_TILE
 
 # Absolute path to the compiled .o file, resolved at GENERATION time.
