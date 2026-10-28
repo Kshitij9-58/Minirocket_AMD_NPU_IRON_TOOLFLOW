@@ -18,6 +18,12 @@ import subprocess
 import itertools
 import time
 import numpy as np
+import json as _json
+try:
+    _ds = _json.load(open("minirocket_model_test_data.json")).get("dataset_name", "unknown")
+except Exception:
+    _ds = "unknown"
+print(f"DATASET: {_ds}")
 import minirocket
 
 from prep_and_verify_fused_pipeline import build_feature_schedule, FEATURES_PER_TILE, SCALE
@@ -202,8 +208,6 @@ def main():
 
     permutations = list(itertools.permutations(range(num_classes)))
     best_acc = 0
-    print(f"{'MAPPING (NPU->True)':<25} | {'ACCURACY':<10}")
-    print("-" * 40)
     for perm in permutations:
         correct = 0
         for i in range(len(X_test)):
@@ -215,10 +219,8 @@ def main():
             if np.argmax(remapped_scores) == Y_test[i]:
                 correct += 1
         acc = correct / len(X_test)
-        print(f"{str(perm):<25} | {acc:.2%}")
         if acc > best_acc:
             best_acc = acc
-    print("-" * 40)
     print(f" FINAL BEST ACCURACY: {best_acc:.2%}")
 
     # ===== PERFORMANCE METRICS: MEASURED and MODELED, side by side =====
@@ -379,7 +381,7 @@ def main():
             _, ax5 = plt.subplots(figsize=(7, 6))
             bars5 = ax5.bar(imp_labels, imp_vals, color=['#e74c3c', '#2ecc71'], width=0.5)
             ax5.set_ylabel('Measured Latency per Sample (ms)', fontsize=12, fontweight='bold')
-            ax5.set_title('Improvement: Measured Latency per Sample\n(same 64 test samples)', fontsize=13, fontweight='bold')
+            ax5.set_title('Improvement: Measured Latency per Sample\n(' + _ds + ', ' + str(len(X_test)) + ' test samples)', fontsize=13, fontweight='bold')
             for bar in bars5:
                 yval = bar.get_height()
                 ax5.text(bar.get_x() + bar.get_width() / 2, yval + max(imp_vals) * 0.015, f"{yval:.2f} ms",

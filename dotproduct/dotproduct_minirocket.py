@@ -8,6 +8,12 @@ import sys
 import json
 import subprocess
 import numpy as np
+import json as _json
+try:
+    _ds = _json.load(open("minirocket_model_test_data.json")).get("dataset_name", "unknown")
+except Exception:
+    _ds = "unknown"
+print(f"DATASET: {_ds}")
 import itertools
 import time
 import minirocket
@@ -267,9 +273,6 @@ def main():
 
     best_acc = 0
 
-    print(f"{'MAPPING (NPU->True)':<25} | {'ACCURACY':<10}")
-    print("-" * 40)
-
     for perm in permutations:
         correct = 0
         for i in range(len(X_test)):
@@ -284,11 +287,9 @@ def main():
                 correct += 1
 
         acc = correct / len(X_test)
-        print(f"{str(perm):<25} | {acc:.2%}")
         if acc > best_acc:
             best_acc = acc
 
-    print("-" * 40)
     print(f" FINAL BEST ACCURACY: {best_acc:.2%}")
 
     # ===== PERFORMANCE METRICS: MEASURED and MODELED, side by side =====

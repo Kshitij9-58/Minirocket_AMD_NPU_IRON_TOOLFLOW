@@ -18,6 +18,12 @@ import itertools
 import json
 
 import numpy as np
+import json as _json
+try:
+    _ds = _json.load(open("minirocket_model_test_data.json")).get("dataset_name", "unknown")
+except Exception:
+    _ds = "unknown"
+print(f"DATASET: {_ds}")
 
 import minirocket
 
@@ -85,8 +91,6 @@ def main():
 
     permutations = list(itertools.permutations(range(num_classes)))
     best_acc = 0.0
-    print(f"{'MAPPING (NPU->True)':<25} | {'ACCURACY':<10}")
-    print("-" * 40)
     for perm in permutations:
         correct = 0
         for i in range(num_samples):
@@ -98,9 +102,7 @@ def main():
             if np.argmax(remapped) == Y_test[i]:
                 correct += 1
         acc = correct / num_samples
-        print(f"{str(perm):<25} | {acc:.2%}")
         best_acc = max(best_acc, acc)
-    print("-" * 40)
     print(f" FINAL BEST ACCURACY: {best_acc:.2%}")
 
     # Measured timing from the runner
