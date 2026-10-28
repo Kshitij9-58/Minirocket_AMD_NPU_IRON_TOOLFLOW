@@ -1,3 +1,30 @@
 ironenv/
 __pycache__/
 .ipynb_checkpoints/
+# compiled runner binaries (rebuild from .cpp)
+**/dotprod12_runner
+**/dotprod_runner
+**/dotprod_runner_batch
+**/fused14_join_refeed_runner
+**/fused_pipeline_runner
+**/pipeline_inprocess_runner
+**/transform_full420_runner
+**/transform_test8_runner
+# generated data and logs
+**/_f14_*.txt
+**/*_run.log
+**/aiecc_output.log
+**/inproc_*.txt
+**/inproc_*.bak
+**/fused14_output.txt
+**/fused14_scores.txt
+**/fused14_features_out.txt
+**/fused_pipeline_output.txt
+**/combined_*.txt
+**/batch_*.txt
+**/cpu_reference_*.txt
+**/npu_output_*.txt
+**/classifier_weights*.txt
+**/png_backup/
+# per-dataset model files (regenerate with train_minirocket_dataset.py)
+**/ds/*/minirocket_model*.json
